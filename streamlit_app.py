@@ -30,8 +30,7 @@ if "nonce" not in st.session_state:
 if "active_params" not in st.session_state:
     st.session_state.active_params = None  # wird per "Anwenden" gesetzt
 
-# Kleiner Build-Marker zur Diagnose (Button entfernt)
-st.sidebar.write("🔧 Build: compute-on-apply **v1.0**")
+st.sidebar.write("🔧 Build: compute-on-apply **v1.1 (cloud-robust)**")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sidebar: Eingaben + Steuerung
@@ -63,12 +62,13 @@ threshold      = threshold_pct / 100.0
 st.sidebar.markdown("---")
 apply_clicked   = st.sidebar.button("⚙️ Anwenden / Rechnen", use_container_width=True)
 refresh_clicked = st.sidebar.button("🔄 Neu simulieren (frische Zufallsläufe)", use_container_width=True)
-run_bayes       = st.sidebar.button("▶︎ Bayes-Optimierung starten", use_container_width=True)
+
+# Bayes Button unten separat (wird weiter unten verwendet)
+# (wir setzen ihn absichtlich nicht hier, damit der Klick klar getrennt ist)
 
 # Snapshot anwenden
 if apply_clicked:
-    # Monotonie der Preis-Quantile robust erzwingen
-    p10, p50, p90 = sorted([float(P10), float(P50), float(P90)])
+    p10, p50, p90 = sorted([float(P10), float(P50), float(P90)])  # robust
     st.session_state.active_params = dict(
         quality=float(quality), tagessatz=float(tagessatz), discount=float(discount),
         projekttage=int(projekttage), cost_per_day=float(cost_per_day),
@@ -79,7 +79,6 @@ if apply_clicked:
         threshold=float(threshold)
     )
 
-# Frische Zufälle – nutzt den aktiven Snapshot
 if refresh_clicked:
     st.session_state.nonce = int(time.time())
 
@@ -108,16 +107,15 @@ def simulate_comp_cached(sim_runs, wettbewerber_n, projekttage,
 
 @st.cache_data(ttl=900)
 def compute_heatmap_grid_fast(rates, discounts, comp_max, projekttage, denom, wQ, wP, quality):
-    """Schnelle, vektorisierte Heatmap-Berechnung."""
-    R = rates[:, None].astype(float)     # (lenR,1)
-    D = discounts[None, :].astype(float) # (1,lenD)
-    net  = R * (1.0 - D)                 # (lenR,lenD)
+    R = rates[:, None].astype(float)
+    D = discounts[None, :].astype(float)
+    net  = R * (1.0 - D)
     baseQ = wQ * (quality / 10.0)
     price_term = 1.0 - (net * projekttage) / denom
     our_score  = baseQ + wP * price_term
-    cm = comp_max[None, None, :]         # (1,1,lenSims)
-    os = our_score[:, :, None]           # (lenR,lenD,1)
-    wr = (os > cm).mean(axis=2)          # (lenR,lenD)
+    cm = comp_max[None, None, :]
+    os = our_score[:, :, None]
+    wr = (os > cm).mean(axis=2)
     wr = np.where(np.isfinite(wr), wr, 0.0)
     return wr
 
@@ -189,38 +187,81 @@ c3.metric("ExpProfit (€/Projekt)", f"{exp_profit:,.0f}".replace(",", "."))
 st.divider()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Bayes (nur bei Klick; rechnet auf aktuellem Snapshot; Zeitbudget)
+# Bayes (Cloud-robust: Budget, Drosselung, Downsampling, Guards)
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Automatische ExpProfit-Optimierung (Bayes)")
-if bayes_available:
+
+def bayes_comp_subset(comp_max: np.ndarray, target_size: int, seed: int) -> np.ndarray:
+    """Downsampling der Simulationen für Bayes (beschleunigt in der Cloud)."""
+    s = comp_max.size
+    if target_size >= s:
+        return comp_max
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(s, size=target_size, replace=False)
+    return comp_max[idx]
+
+if not bayes_available:
+    st.info("Bayes-Optimierung verfügbar nach Installation: `pip install scikit-optimize`")
+else:
+    # Heuristik: große Jobs erkennen
+    big_job = (T > 3000) or (N > 12)
+    # Cloud-freundliche Parameter
+    TIME_BUDGET = 6.5                 # Sekunden
+    N_CALLS     = 12 if big_job else 16
+    # Downsampling: max. 1500 Slices für Bayes – spart massiv CPU
+    SUBSET      = min(1500, comp_max.size)
+
+    if big_job:
+        st.warning("Bayes in der Cloud gedrosselt: weniger Aufrufe & Downsampling der Simulation.")
+
+    run_bayes = st.button("▶︎ Bayes-Optimierung starten", use_container_width=True)
     if run_bayes:
         import time as _t
-        start = _t.time(); TIME_BUDGET = 10.0
+        start = _t.time()
         try:
+            # Subset der Wettbewerbs-Scores für schnellere Evaluierung
+            comp_ref = bayes_comp_subset(comp_max, SUBSET, seed=st.session_state.nonce)
             space = [(400, 1500), (0.0, 0.5)]  # (Brutto, Rabatt)
+
+            # Fortschritt
+            prog = st.progress(0.0, text="Bayes läuft …")
+            calls_done = 0
+
             def objective(x):
-                if _t.time() - start > TIME_BUDGET:
+                nonlocal calls_done
+                now = _t.time()
+                # harte Zeitbremse – vermeidet Cloud-Reset
+                if now - start > TIME_BUDGET:
                     return 1e12
                 r, d  = x
                 net   = r * (1 - d)
                 score = wQ_*(q/10.0) + wP_*(1 - (net * days) / denom)
-                wr    = float((score > comp_max).mean())
-                if not np.isfinite(wr): return 1e12
+                wr    = float((score > comp_ref).mean())
+                if not np.isfinite(wr):  # NaN/Inf Guard
+                    return 1e12
                 val   = wr * (net - cpd) * days
-                if not np.isfinite(val): return 1e12
+                if not np.isfinite(val):
+                    return 1e12
+                calls_done += 1
+                prog.progress(min(1.0, calls_done/max(1,N_CALLS)), text=f"Bayes läuft … ({calls_done}/{N_CALLS})")
                 return -val
 
-            res = gp_minimize(objective, space, n_calls=25, random_state=0)
+            with st.spinner("Suche bestes Set …"):
+                res = gp_minimize(
+                    objective, space,
+                    n_calls=N_CALLS, n_random_starts=max(3, N_CALLS//3),
+                    acq_func="EI", random_state=0
+                )
+
             br, bd = res.x
             bp     = -res.fun
-            st.info(f"Optimal: Brutto {br:.0f} €, Rabatt {bd*100:.0f}% → Effektiv {br*(1-bd):.0f} € | ExpProfit {bp:.0f} €")
+            st.success(
+                f"Optimal: Brutto {br:.0f} €, Rabatt {bd*100:.0f}% → "
+                f"Effektiv {br*(1-bd):.0f} € | ExpProfit {bp:.0f} €"
+            )
         except Exception as e:
-            st.error("Bayes-Optimierung übersprungen:")
+            st.error("Bayes-Optimierung abgebrochen.")
             st.exception(e)
-    else:
-        st.info("Bayes läuft nur bei Klick auf „▶︎ Bayes-Optimierung starten“.")
-else:
-    st.info("Bayes-Optimierung verfügbar nach Installation:  `pip install scikit-optimize`")
 
 st.divider()
 
@@ -255,25 +296,24 @@ st.subheader("Top-5-Angebote (Marge > 0 & WinRate-Schwelle)")
 try:
     records=[]
     baseQ = wQ_*(q/10.0)
+    rates = np.arange(400, 1501, 50)
     for r in rates:
         price_term= 1 - (r * days) / denom
         our_sc_r  = baseQ + wP_ * price_term
         wr        = float((our_sc_r > comp_max).mean())
         mar       = (r - cpd) / max(r, 1e-9) * 100.0
-        if np.isfinite(wr) and np.isfinite(mar) and (mar > 0) and (wr >= threshold):
+        if np.isfinite(wr) and np.isfinite(mar) and (mar > 0) and (wr >= thresh):
             records.append({'Brutto (€)': int(r), 'WinRate': wr, 'Marge (%)': mar})
     df_all = pd.DataFrame(records)
     if df_all.empty:
         st.info("Keine Kombination erfüllt aktuell die Filter. Zeige beste 5 nach WinRate (Marge > 0).")
-        records=[]
         for r in rates:
             price_term= 1 - (r * days) / denom
             our_sc_r  = baseQ + wP_*price_term
             wr        = float((our_sc_r > comp_max).mean())
             mar       = (r - cpd) / max(r, 1e-9) * 100.0
             if np.isfinite(wr) and np.isfinite(mar) and (mar > 0):
-                records.append({'Brutto (€)': int(r), 'WinRate': wr, 'Marge (%)': mar})
-        df_all = pd.DataFrame(records)
+                df_all = pd.concat([df_all, pd.DataFrame([{'Brutto (€)': int(r), 'WinRate': wr, 'Marge (%)': mar}])], ignore_index=True)
 
     if not df_all.empty:
         df_top5 = df_all.nlargest(5, 'WinRate').copy()
@@ -296,7 +336,8 @@ st.divider()
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Pareto-Analyse: WinRate vs. ExpProfit")
 try:
-    df_pareto = compute_pareto_df(rates, discounts, comp_max, days, denom, wQ_, wP_, q, cpd)
+    discounts = np.arange(0, 51, 5) / 100.0
+    df_pareto = compute_pareto_df(np.arange(400,1501,50), discounts, comp_max, days, denom, wQ_, wP_, q, cpd)
     if not df_pareto.empty and df_pareto['Profit'].notna().any():
         best = df_pareto.loc[df_pareto['Profit'].idxmax()]
         st.info(f"🎯 Sweet Spot: WinRate {best.WinRate:.1%}, ExpProfit {best.Profit:.0f} €")
