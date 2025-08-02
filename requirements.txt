@@ -1,5 +1,5 @@
-streamlit
-numpy
-pandas
-plotly
-scikit-optimize
+streamlit>=1.24
+plotly>=5.15
+pandas>=2.0
+numpy>=1.24
+scikit-optimize>=0.9.0
