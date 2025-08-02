@@ -169,7 +169,7 @@ else:
         start_t = _t.time()
         try:
             comp_ref = _bayes_subset(comp_max, SUBSET, st.session_state.nonce)
-            space = [(400, 1500), (0.0, 0.5)]
+            space = [(400.0, 1500.0), (0.0, 0.5)]
             prog = st.progress(0.0, text="Bayes läuft …")
             prog_counter = {"n": 0}
             def objective(x):
