@@ -146,56 +146,65 @@ c3.metric("ExpProfit (€/Projekt)", f"{exp_profit:,.0f}".replace(",", "."))
 
 st.divider()
 
-st.subheader("Automatische ExpProfit-Optimierung (Bayes)")
 
+st.subheader("Automatische ExpProfit-Optimierung (Bayes)")
 def _bayes_subset(arr: np.ndarray, target: int, seed: int) -> np.ndarray:
     s = arr.size
     if target >= s: return arr
     rng = np.random.default_rng(seed)
     idx = rng.choice(s, size=target, replace=False)
     return arr[idx]
-
 if not bayes_available:
     st.info("Bayes-Optimierung verfügbar nach Installation: `pip install scikit-optimize`")
 else:
     big_job = (T > 3000) or (N > 12)
-    TIME_BUDGET = 6.5
-    N_CALLS     = 12 if big_job else 16
-    SUBSET      = min(1500, comp_max.size)
+    TIME_BUDGET = 5.5
+    N_CALLS     = 10 if big_job else 14
+    SUBSET      = min(1000, comp_max.size)
     if big_job:
         st.warning("Bayes in der Cloud gedrosselt: weniger Aufrufe & Downsampling.")
     if st.button("▶︎ Bayes-Optimierung starten", use_container_width=True):
         import time as _t
+        from skopt import Optimizer
         start_t = _t.time()
         try:
             comp_ref = _bayes_subset(comp_max, SUBSET, st.session_state.nonce)
             space = [(400.0, 1500.0), (0.0, 0.5)]
+            opt = Optimizer(space, base_estimator="GP", acq_func="EI", random_state=0, n_initial_points=max(4, N_CALLS//3))
             prog = st.progress(0.0, text="Bayes läuft …")
-            prog_counter = {"n": 0}
-            def objective(x):
-                if _t.time() - start_t > TIME_BUDGET:
-                    return 1e12
-                r, d  = x
+            calls_done = 0
+            best_x = None
+            best_y = 1e12
+            while calls_done < N_CALLS and (_t.time() - start_t) < TIME_BUDGET:
+                x = opt.ask()
+                r, d = x
                 net   = r * (1 - d)
                 score = wQ_*(q/10.0) + wP_*(1 - (net * days) / denom)
                 wr    = float((score > comp_ref).mean())
-                if not np.isfinite(wr): return 1e12
-                val   = wr * (net - cpd) * days
-                if not np.isfinite(val): return 1e12
-                prog_counter["n"] += 1
-                prog.progress(min(1.0, prog_counter["n"]/max(1,N_CALLS)),
-                              text=f"Bayes läuft … ({prog_counter['n']}/{N_CALLS})")
-                return -val
-            with st.spinner("Suche bestes Set …"):
-                res = gp_minimize(objective, space,
-                                  n_calls=N_CALLS, n_random_starts=max(3, N_CALLS//3),
-                                  acq_func="EI", random_state=0)
-            br, bd = res.x; bp = -res.fun
-            st.success(f"Optimal: Brutto {br:.0f} €, Rabatt {bd*100:.0f}% → Effektiv {br*(1-bd):.0f} € | ExpProfit {bp:.0f} €")
+                if not np.isfinite(wr):
+                    y = 1e12
+                else:
+                    val = wr * (net - cpd) * days
+                    y = -val if np.isfinite(val) else 1e12
+                opt.tell(x, y)
+                calls_done += 1
+                prog.progress(min(1.0, calls_done/max(1, N_CALLS)), text=f"Bayes läuft … ({calls_done}/{N_CALLS})")
+                if y < best_y:
+                    best_y = y
+                    best_x = x
+            if best_x is None and opt.yi:
+                idx = int(np.argmin(opt.yi))
+                best_x = opt.Xi[idx]
+                best_y = opt.yi[idx]
+            if best_x is None:
+                st.error("Keine valide Lösung gefunden.")
+            else:
+                br, bd = best_x
+                bp     = -best_y
+                st.success(f"Optimal: Brutto {br:.0f} €, Rabatt {bd*100:.0f}% → Effektiv {br*(1-bd):.0f} € | ExpProfit {bp:.0f} €")
         except Exception as e:
             st.error("Bayes-Optimierung abgebrochen.")
             st.exception(e)
-
 st.divider()
 
 st.subheader("Heatmap: Gewinnwahrscheinlichkeit")
