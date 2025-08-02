@@ -22,23 +22,23 @@ if "nonce" not in st.session_state:
 if "active_params" not in st.session_state:
     st.session_state.active_params = None
 
-st.sidebar.caption("Build: compute-on-apply v1.2 • Cloud-robust")
+st.sidebar.caption("Build: compute-on-apply v1.3")
 
 st.sidebar.header("Einstellungen")
 quality        = st.sidebar.slider("Qualität (0–10)", 0, 10, 8)
 tagessatz      = st.sidebar.slider("Brutto-Tagessatz (€)", 400, 1500, 950, step=50)
 discount_pct   = st.sidebar.slider("Rabatt (%)", 0, 50, 0, step=5)
 discount       = discount_pct/100.0
-projekttage    = st.sidebar.number_input("Projekttage", 1, 1000, 50)
-cost_per_day   = st.sidebar.number_input("Kosten pro Tag (€)", 1, 10000, 500)
+projekttage    = st.sidebar.number_input("Projekttage", min_value=1, max_value=1000, value=50, step=1)
+cost_per_day   = st.sidebar.number_input("Kosten pro Tag (€)", min_value=1.0, max_value=10000.0, value=500.0, step=1.0)
 wettbewerber_n = st.sidebar.slider("Anzahl Wettbewerber", 1, 20, 10)
 tage_dev       = st.sidebar.slider("Tage-Abweichung (%)", 0.0, 0.5, 0.3)
 sim_runs       = st.sidebar.slider("Simulationsläufe", 100, 10000, 2000, step=100)
 wQ = st.sidebar.slider("Gewichtung Qualität (wQ)", 0.0, 1.0, 0.3)
 wP = 1 - wQ
-P10            = st.sidebar.number_input("P10 Preis Wettbewerber (€)", 1, 10000, 500.0)
-P50            = st.sidebar.number_input("P50 Preis Wettbewerber (€)", 1, 10000, 950.0)
-P90            = st.sidebar.number_input("P90 Preis Wettbewerber (€)", 1, 10000, 1300.0)
+P10            = st.sidebar.number_input("P10 Preis Wettbewerber (€)", min_value=1.0, max_value=10000.0, value=500.0, step=1.0)
+P50            = st.sidebar.number_input("P50 Preis Wettbewerber (€)", min_value=1.0, max_value=10000.0, value=950.0, step=1.0)
+P90            = st.sidebar.number_input("P90 Preis Wettbewerber (€)", min_value=1.0, max_value=10000.0, value=1300.0, step=1.0)
 comp_qual_mean = st.sidebar.slider("Mittl. Wettbewerber-Qualität (0–10)", 0.0, 10.0, 7.0)
 sigma_mult     = st.sidebar.slider("Preis-Volatilität Faktor", 0.5, 2.0, 1.0)
 threshold_pct  = st.sidebar.slider("Min. WinRate (%) (Top-5 Filter)", 0, 100, 70)
@@ -113,18 +113,18 @@ if not params:
     st.info("Wähle links deine Einstellungen und klicke „⚙️ Anwenden / Rechnen“.")
     st.stop()
 
-q   = params["quality"]
-rate= params["tagessatz"]
-disc= params["discount"]
-days= params["projekttage"]
-cpd = params["cost_per_day"]
-N   = params["wettbewerber_n"]
-dev = params["tage_dev"]
-T   = params["sim_runs"]
-wQ_ = params["wQ"]; wP_ = params["wP"]
-P10_= params["P10"]; P50_ = params["P50"]; P90_ = params["P90"]
-cqm = params["comp_qual_mean"]; sgm = params["sigma_mult"]
-thresh = params["threshold"]
+q         = params["quality"]
+rate      = params["tagessatz"]
+disc      = params["discount"]
+days      = params["projekttage"]
+cpd       = params["cost_per_day"]
+N         = params["wettbewerber_n"]
+dev       = params["tage_dev"]
+T         = params["sim_runs"]
+wQ_       = params["wQ"]; wP_ = params["wP"]
+P10_      = params["P10"]; P50_ = params["P50"]; P90_ = params["P90"]
+cqm       = params["comp_qual_mean"]; sgm = params["sigma_mult"]
+thresh    = params["threshold"]
 
 denom = max(P90_ * days, 1e-9)
 
@@ -237,11 +237,9 @@ if df_all.empty:
 if not df_all.empty:
     df_top5 = df_all.nlargest(5, 'WinRate').copy()
     df_top5['WinRate (%)'] = df_top5['WinRate']*100.0
-    st.table(
-        df_top5[['Brutto (€)','WinRate (%)','Marge (%)']].style.format({
-            'WinRate (%)':'{:.2f}%',
-            'Marge (%)':'{:.1f}%'
-        })
+    st.dataframe(
+        df_top5[['Brutto (€)','WinRate (%)','Marge (%)']].round({'WinRate (%)':2,'Marge (%)':1}),
+        use_container_width=True
     )
 else:
     st.info("Keine Kombination mit positiver Marge gefunden.")
